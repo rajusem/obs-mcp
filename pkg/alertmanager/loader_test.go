@@ -2,7 +2,11 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	promapi "github.com/prometheus/client_golang/api"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
 )
@@ -284,6 +288,57 @@ func TestGetSilences(t *testing.T) {
 			t.Errorf("expected 0 silences, got %d", len(silences))
 		}
 	})
+}
+
+// TestNewAlertmanagerClientUsesRoundTripper is a regression test that verifies
+// the custom RoundTripper from apiConfig is actually invoked when making HTTP
+// requests. Without the fix, NewAlertmanagerClient would discard the RoundTripper
+// (carrying TLS + auth settings) resulting in x509 and 401 errors.
+func TestNewAlertmanagerClientUsesRoundTripper(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return a valid but minimal JSON response so the client does not error on parsing
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer ts.Close()
+
+	trackingRT := &trackingRoundTripper{
+		inner:  http.DefaultTransport,
+		called: &called,
+	}
+
+	apiConfig := promapi.Config{
+		Address:      ts.URL,
+		RoundTripper: trackingRT,
+	}
+
+	loader, err := NewAlertmanagerClient(apiConfig)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if loader == nil {
+		t.Fatal("expected non-nil loader")
+	}
+
+	// Attempt a request — the RoundTripper should be called
+	_, _ = loader.GetAlerts(context.TODO(), nil, nil, nil, nil, nil, "")
+
+	if !called {
+		t.Error("expected custom RoundTripper to be called, but it was not; transport config is being ignored")
+	}
+}
+
+// trackingRoundTripper wraps another RoundTripper and records whether it was called.
+type trackingRoundTripper struct {
+	inner  http.RoundTripper
+	called *bool
+}
+
+func (t *trackingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	*t.called = true
+	return t.inner.RoundTrip(req)
 }
 
 // Helper functions to create pointers
