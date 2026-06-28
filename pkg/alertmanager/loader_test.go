@@ -2,9 +2,14 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
+	alertmanagerClient "github.com/prometheus/alertmanager/api/v2/client"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -293,4 +298,70 @@ func ptrString(s string) *string {
 
 func ptrBool(b bool) *bool {
 	return &b
+}
+
+// TestNewAlertmanagerClientUsesRoundTripper verifies that NewAlertmanagerClient
+// correctly uses the RoundTripper from api.Config instead of ignoring it.
+func TestNewAlertmanagerClientUsesRoundTripper(t *testing.T) {
+	// Create a test server
+	testServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testServer.Close()
+
+	// Create a custom RoundTripper that tracks if it was called
+	customRoundTripper := &trackingRoundTripper{
+		base: testServer.Client().Transport,
+	}
+
+	// Create api.Config with our custom RoundTripper
+	apiConfig := api.Config{
+		Address:      testServer.URL,
+		RoundTripper: customRoundTripper,
+	}
+
+	// Create the Alertmanager client
+	loader, err := NewAlertmanagerClient(apiConfig)
+	if err != nil {
+		t.Fatalf("failed to create Alertmanager client: %v", err)
+	}
+
+	// Verify the client was created with our custom RoundTripper
+	if loader == nil {
+		t.Fatal("expected loader to be non-nil")
+	}
+
+	// Verify that the internal client uses our custom RoundTripper
+	// We can check this by inspecting the transport chain
+	// The fix should propagate our RoundTripper to the underlying HTTP client
+	verifyRoundTripperUsed(loader.client, customRoundTripper, t)
+}
+
+// verifyRoundTripperUsed verifies the custom RoundTripper is used in the client
+func verifyRoundTripperUsed(client *alertmanagerClient.AlertmanagerAPI, expected *trackingRoundTripper, t *testing.T) {
+	// The go-openapi generated client embeds the transport
+	// We need to verify that our custom RoundTripper is in the chain
+	// Since we can't directly access the internal transport, we test behavior instead
+
+	// Make a request that should use our custom RoundTripper
+	// This will fail due to TLS but proves the RoundTripper was invoked
+	ctx := context.Background()
+	_, _ = client.Alert.GetAlerts(alert.NewGetAlertsParams().WithContext(ctx))
+
+	// If the custom RoundTripper was called during request setup, the fix works
+	if !expected.called {
+		t.Error("expected custom RoundTripper to be used during HTTP client creation")
+	}
+}
+
+// trackingRoundTripper is a RoundTripper that wraps another RoundTripper
+// and tracks whether it was used.
+type trackingRoundTripper struct {
+	base    http.RoundTripper
+	called bool
+}
+
+func (t *trackingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.called = true
+	return t.base.RoundTrip(req)
 }

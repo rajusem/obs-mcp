@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/prometheus/alertmanager/api/v2/client"
+	"github.com/go-openapi/runtime/client"
+	"github.com/go-openapi/strfmt"
+	alertmanagerClient "github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
 	"github.com/prometheus/alertmanager/api/v2/models"
@@ -23,7 +26,7 @@ type Loader interface {
 
 // RealLoader implements Loader
 type RealLoader struct {
-	client *client.AlertmanagerAPI
+	client *alertmanagerClient.AlertmanagerAPI
 }
 
 // Ensure RealLoader implements Loader at compile time
@@ -46,14 +49,25 @@ func NewAlertmanagerClient(apiConfig api.Config) (*RealLoader, error) {
 		scheme = "http"
 	}
 
-	cfg := client.DefaultTransportConfig().
-		WithHost(host).
-		WithSchemes([]string{scheme})
+	// Use the configured RoundTripper, falling back to DefaultTransport if nil
+	rt := apiConfig.RoundTripper
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
 
-	c := client.NewHTTPClientWithConfig(nil, cfg)
+	// Create an HTTP client that uses the configured RoundTripper
+	httpClient := &http.Client{Transport: rt}
+
+	// Create transport that uses our custom HTTP client
+	// client.NewWithClient returns *runtime.Runtime which implements runtime.ClientTransport
+	transport := client.NewWithClient(host, "/api/v2", []string{scheme}, httpClient)
+
+	// Create the Alertmanager API client with our transport
+	// alertmanagerClient.New() expects runtime.ClientTransport and strfmt.Registry
+	amClient := alertmanagerClient.New(transport, strfmt.Default)
 
 	return &RealLoader{
-		client: c,
+		client: amClient,
 	}, nil
 }
 
