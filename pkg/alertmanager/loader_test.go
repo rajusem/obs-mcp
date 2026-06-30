@@ -2,9 +2,12 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -284,6 +287,58 @@ func TestGetSilences(t *testing.T) {
 			t.Errorf("expected 0 silences, got %d", len(silences))
 		}
 	})
+}
+
+// TestNewAlertmanagerClientUsesRoundTripper is a regression test for OBSINTA-1371.
+// It verifies that NewAlertmanagerClient honours the RoundTripper set in the
+// api.Config, so that TLS settings (--insecure) and bearer-token authentication
+// are not silently discarded.  Before the fix, NewAlertmanagerClient created a
+// default HTTP client that ignored apiConfig.RoundTripper, causing x509 and 401
+// errors when connecting to secured Alertmanager endpoints.
+func TestNewAlertmanagerClientUsesRoundTripper(t *testing.T) {
+	roundTripperInvoked := false
+
+	// A custom RoundTripper that records whether it was called.
+	customRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		roundTripperInvoked = true
+		// Return a minimal valid Alertmanager response so the client can parse it.
+		rec := httptest.NewRecorder()
+		rec.Header().Set("Content-Type", "application/json")
+		rec.WriteHeader(http.StatusOK)
+		_, _ = rec.Write([]byte("[]"))
+		return rec.Result(), nil
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	apiConfig := api.Config{
+		Address:      srv.URL,
+		RoundTripper: customRT,
+	}
+
+	loader, err := NewAlertmanagerClient(apiConfig)
+	if err != nil {
+		t.Fatalf("NewAlertmanagerClient returned unexpected error: %v", err)
+	}
+
+	// Trigger an actual HTTP call so we can confirm the custom RoundTripper is used.
+	_, _ = loader.GetAlerts(context.TODO(), nil, nil, nil, nil, nil, "")
+
+	if !roundTripperInvoked {
+		t.Error("custom RoundTripper was NOT invoked: NewAlertmanagerClient is ignoring the transport config (regression of OBSINTA-1371)")
+	}
+}
+
+// roundTripperFunc adapts a function to the http.RoundTripper interface.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // Helper functions to create pointers

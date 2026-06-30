@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
@@ -46,11 +48,19 @@ func NewAlertmanagerClient(apiConfig api.Config) (*RealLoader, error) {
 		scheme = "http"
 	}
 
-	cfg := client.DefaultTransportConfig().
-		WithHost(host).
-		WithSchemes([]string{scheme})
+	// Use the RoundTripper from apiConfig to honour TLS settings (e.g. --insecure)
+	// and bearer-token authentication passed by the caller. Wrapping it in an
+	// http.Client and passing it to httptransport.NewWithClient ensures that the
+	// openapi-generated transport uses the same transport stack instead of the
+	// default http.DefaultTransport, which previously caused x509 and 401 errors.
+	rt := apiConfig.RoundTripper
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	httpClient := &http.Client{Transport: rt}
 
-	c := client.NewHTTPClientWithConfig(nil, cfg)
+	transport := httptransport.NewWithClient(host, client.DefaultBasePath, []string{scheme}, httpClient)
+	c := client.New(transport, nil)
 
 	return &RealLoader{
 		client: c,
