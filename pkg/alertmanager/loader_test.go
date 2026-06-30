@@ -2,9 +2,12 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -284,6 +287,68 @@ func TestGetSilences(t *testing.T) {
 			t.Errorf("expected 0 silences, got %d", len(silences))
 		}
 	})
+}
+
+// TestNewAlertmanagerClientUsesRoundTripper verifies that when a RoundTripper is provided
+// in the api.Config, it is actually invoked when the client makes HTTP requests.
+// This is a regression test for OBSINTA-1370 where the RoundTripper was silently ignored.
+func TestNewAlertmanagerClientUsesRoundTripper(t *testing.T) {
+	roundTripperCalled := false
+
+	// Create a test HTTP server that returns a valid Alertmanager response
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer ts.Close()
+
+	// Create a RoundTripper that records whether it was called and delegates to default transport
+	customRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		roundTripperCalled = true
+		return http.DefaultTransport.RoundTrip(req)
+	})
+
+	apiConfig := api.Config{
+		Address:      ts.URL,
+		RoundTripper: customRT,
+	}
+
+	loader, err := NewAlertmanagerClient(apiConfig)
+	if err != nil {
+		t.Fatalf("NewAlertmanagerClient failed: %v", err)
+	}
+
+	// Trigger a request to exercise the RoundTripper
+	_, _ = loader.GetAlerts(context.Background(), nil, nil, nil, nil, nil, "")
+
+	if !roundTripperCalled {
+		t.Error("expected custom RoundTripper to be called, but it was not — apiConfig.RoundTripper is being ignored")
+	}
+}
+
+// TestNewAlertmanagerClientNilRoundTripperFallback verifies that when no RoundTripper is provided,
+// NewAlertmanagerClient falls back to the default HTTP client (backward compatibility).
+func TestNewAlertmanagerClientNilRoundTripperFallback(t *testing.T) {
+	apiConfig := api.Config{
+		Address:      "http://localhost:9093",
+		RoundTripper: nil,
+	}
+
+	loader, err := NewAlertmanagerClient(apiConfig)
+	if err != nil {
+		t.Fatalf("NewAlertmanagerClient with nil RoundTripper should not fail: %v", err)
+	}
+	if loader == nil {
+		t.Fatal("expected non-nil loader, got nil")
+	}
+}
+
+// roundTripperFunc is a function type that implements http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 // Helper functions to create pointers

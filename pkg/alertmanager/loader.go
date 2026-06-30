@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
@@ -50,7 +52,14 @@ func NewAlertmanagerClient(apiConfig api.Config) (*RealLoader, error) {
 		WithHost(host).
 		WithSchemes([]string{scheme})
 
-	c := client.NewHTTPClientWithConfig(nil, cfg)
+	var c *client.AlertmanagerAPI
+	if apiConfig.RoundTripper != nil {
+		httpClient := &http.Client{Transport: apiConfig.RoundTripper}
+		transport := httptransport.NewWithClient(host, cfg.BasePath, []string{scheme}, httpClient)
+		c = client.New(transport, nil)
+	} else {
+		c = client.NewHTTPClientWithConfig(nil, cfg)
+	}
 
 	return &RealLoader{
 		client: c,
