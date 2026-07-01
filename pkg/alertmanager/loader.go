@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
@@ -46,11 +47,16 @@ func NewAlertmanagerClient(apiConfig api.Config) (*RealLoader, error) {
 		scheme = "http"
 	}
 
-	cfg := client.DefaultTransportConfig().
-		WithHost(host).
-		WithSchemes([]string{scheme})
+	transport := httptransport.New(host, client.DefaultBasePath, []string{scheme})
 
-	c := client.NewHTTPClientWithConfig(nil, cfg)
+	// Inject the configured RoundTripper (carries TLS + auth settings).
+	// This ensures --insecure, bearer token, and kubeconfig-based mTLS are honored,
+	// matching how NewPrometheusClient works via api.NewClient(apiConfig).
+	if apiConfig.RoundTripper != nil {
+		transport.Transport = apiConfig.RoundTripper
+	}
+
+	c := client.New(transport, nil)
 
 	return &RealLoader{
 		client: c,
