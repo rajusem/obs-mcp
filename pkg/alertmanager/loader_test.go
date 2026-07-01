@@ -2,9 +2,11 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -282,6 +284,76 @@ func TestGetSilences(t *testing.T) {
 
 		if len(silences) != 0 {
 			t.Errorf("expected 0 silences, got %d", len(silences))
+		}
+	})
+}
+
+// roundTripperFunc is a simple adapter to use a function as an http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewAlertmanagerClient_UsesRoundTripper(t *testing.T) {
+	t.Run("custom RoundTripper is wired into client", func(t *testing.T) {
+		called := false
+		customRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			called = true
+			return &http.Response{StatusCode: http.StatusOK}, nil
+		})
+
+		cfg := api.Config{
+			Address:      "https://alertmanager.example.com",
+			RoundTripper: customRT,
+		}
+
+		loader, err := NewAlertmanagerClient(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if loader == nil {
+			t.Fatal("expected non-nil loader")
+		}
+		if loader.client == nil {
+			t.Fatal("expected non-nil client")
+		}
+
+		// Attempt a request to verify the custom RoundTripper is used.
+		// The request will go through our custom RoundTripper which sets called=true.
+		// We don't care about the result — just that our transport was invoked.
+		_, _ = loader.GetAlerts(context.Background(), nil, nil, nil, nil, nil, "")
+		if !called {
+			t.Error("expected custom RoundTripper to be called, but it was not")
+		}
+	})
+
+	t.Run("nil RoundTripper falls back to default client", func(t *testing.T) {
+		cfg := api.Config{
+			Address:      "http://alertmanager.example.com",
+			RoundTripper: nil,
+		}
+
+		loader, err := NewAlertmanagerClient(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if loader == nil {
+			t.Fatal("expected non-nil loader")
+		}
+		if loader.client == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
+
+	t.Run("invalid URL returns error", func(t *testing.T) {
+		cfg := api.Config{
+			Address: "://invalid",
+		}
+
+		_, err := NewAlertmanagerClient(cfg)
+		if err == nil {
+			t.Fatal("expected error for invalid URL")
 		}
 	})
 }
