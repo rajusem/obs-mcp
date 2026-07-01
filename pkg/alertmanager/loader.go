@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/prometheus/alertmanager/api/v2/client"
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
@@ -50,7 +52,20 @@ func NewAlertmanagerClient(apiConfig api.Config) (*RealLoader, error) {
 		WithHost(host).
 		WithSchemes([]string{scheme})
 
-	c := client.NewHTTPClientWithConfig(nil, cfg)
+	var c *client.AlertmanagerAPI
+	if apiConfig.RoundTripper != nil {
+		// Use the configured RoundTripper to preserve TLS and auth settings
+		transport := httptransport.NewWithClient(
+			cfg.Host,
+			cfg.BasePath,
+			cfg.Schemes,
+			&http.Client{Transport: apiConfig.RoundTripper},
+		)
+		c = client.New(transport, nil)
+	} else {
+		// Fall back to default HTTP client when no custom transport is configured
+		c = client.NewHTTPClientWithConfig(nil, cfg)
+	}
 
 	return &RealLoader{
 		client: c,
