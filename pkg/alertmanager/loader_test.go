@@ -2,9 +2,11 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -293,4 +295,83 @@ func ptrString(s string) *string {
 
 func ptrBool(b bool) *bool {
 	return &b
+}
+
+// roundTripperFunc adapts a function to the http.RoundTripper interface.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestNewAlertmanagerClient(t *testing.T) {
+	t.Run("uses configured RoundTripper", func(t *testing.T) {
+		called := false
+		customRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			called = true
+			return &http.Response{StatusCode: http.StatusOK}, nil
+		})
+
+		cfg := api.Config{
+			Address:      "https://alertmanager.example.com",
+			RoundTripper: customRT,
+		}
+
+		loader, err := NewAlertmanagerClient(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error creating client: %v", err)
+		}
+		if loader == nil {
+			t.Fatal("expected non-nil loader")
+		}
+		if loader.client == nil {
+			t.Fatal("expected non-nil alertmanager client")
+		}
+
+		// Verify the custom RoundTripper is wired through by
+		// inspecting the underlying http.Client transport.
+		// The go-openapi runtime exposes the http client via
+		// the Transport().(*httptransport.Runtime).
+		rt := loader.client.Transport
+		if rt == nil {
+			t.Fatal("expected non-nil transport on alertmanager client")
+		}
+
+		// Trigger a request to verify the custom RoundTripper is called.
+		// We call GetAlerts which will fail (no real server), but should
+		// invoke our RoundTripper first.
+		_, _ = loader.GetAlerts(context.Background(), nil, nil, nil, nil, nil, "")
+		if !called {
+			t.Error("custom RoundTripper was not called — transport config is being ignored")
+		}
+	})
+
+	t.Run("falls back to default transport when RoundTripper is nil", func(t *testing.T) {
+		cfg := api.Config{
+			Address:      "http://localhost:9093",
+			RoundTripper: nil,
+		}
+
+		loader, err := NewAlertmanagerClient(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error creating client: %v", err)
+		}
+		if loader == nil {
+			t.Fatal("expected non-nil loader")
+		}
+		if loader.client == nil {
+			t.Fatal("expected non-nil alertmanager client")
+		}
+	})
+
+	t.Run("returns error for invalid URL", func(t *testing.T) {
+		cfg := api.Config{
+			Address: "://invalid-url",
+		}
+
+		_, err := NewAlertmanagerClient(cfg)
+		if err == nil {
+			t.Fatal("expected error for invalid URL")
+		}
+	})
 }
