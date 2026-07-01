@@ -2,9 +2,12 @@ package alertmanager
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/client_golang/api"
 )
 
 // mockAlertmanagerAPI is a mock implementation of the Alertmanager Loader interface
@@ -284,6 +287,60 @@ func TestGetSilences(t *testing.T) {
 			t.Errorf("expected 0 silences, got %d", len(silences))
 		}
 	})
+}
+
+// TestNewAlertmanagerClientTransport verifies that NewAlertmanagerClient injects
+// the RoundTripper from apiConfig into the underlying HTTP transport. This is a
+// regression test for the bug where client.NewHTTPClientWithConfig discarded the
+// configured RoundTripper (TLS settings and bearer token auth).
+func TestNewAlertmanagerClientTransport(t *testing.T) {
+	const wantToken = "test-bearer-token"
+	transportInvoked := false
+
+	// Create a test server that requires a bearer token
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+wantToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// Respond with a valid (empty) alerts JSON payload
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	// Custom RoundTripper that adds the bearer token and records invocation
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		transportInvoked = true
+		req.Header.Set("Authorization", "Bearer "+wantToken)
+		return http.DefaultTransport.RoundTrip(req)
+	})
+
+	loader, err := NewAlertmanagerClient(api.Config{
+		Address:      srv.URL,
+		RoundTripper: rt,
+	})
+	if err != nil {
+		t.Fatalf("NewAlertmanagerClient returned error: %v", err)
+	}
+
+	// Call GetAlerts — if the RoundTripper is ignored we get a 401 error
+	_, err = loader.GetAlerts(context.Background(), nil, nil, nil, nil, nil, "")
+	if err != nil {
+		t.Errorf("GetAlerts returned unexpected error (RoundTripper may not be applied): %v", err)
+	}
+	if !transportInvoked {
+		t.Error("custom RoundTripper was never invoked — transport injection is broken")
+	}
+}
+
+// roundTripperFunc allows using a plain function as an http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // Helper functions to create pointers
